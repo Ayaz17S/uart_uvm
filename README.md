@@ -1,38 +1,45 @@
 # UART with UVM Verification
 
-A small UART (8N1 transmitter + receiver) in SystemVerilog, verified with a UVM 1.2
-testbench in the Vivado simulator (XSim). The testbench checks the TX and RX paths
-independently, injects framing errors, uses assertions on the interface, and reports
-functional coverage.
+A small UART (transmitter + receiver, 8 data bits, optional even/odd parity, 1 stop
+bit) in SystemVerilog, verified with a UVM 1.2 testbench in the Vivado simulator
+(XSim). The testbench checks the TX and RX paths independently, injects framing and
+parity errors, uses assertions on the interface, and reports functional coverage.
 
-**Status:** `all_test` passes: 58/58 TX frames, 78/78 RX frames, 0 assertion
-failures, 100% functional coverage.
+**Status:** `all_test` passes with parity even, odd and none: 58/58 TX frames,
+88/88 RX frames, 0 assertion failures, 100% functional coverage.
 
 ## Design
 
 ```
-            +-------------------- uart_top --------------------+
-            |                                                  |
- clk,rst_n -+-> baud_gen --tick16--+--------------+            |
-            |   (DIV clocks/tick)  |              |            |
- tx_valid --+--------------------> uart_tx ---------------------+--> tx_out
- tx_data  --+--------------------> (16 ticks/bit) |            |
- tx_ready <-+--------------------- |              v            |
-            |                                  uart_rx <-------+--- rx_in
- rx_data  <-+------------------------------- (2-FF sync,      |
- rx_valid <-+-------------------------------  mid-bit sample) |
- frame_err<-+-------------------------------                   |
-            +--------------------------------------------------+
+             +-------------------- uart_top --------------------+
+             |                                                  |
+ clk,rst_n --+-> baud_gen --tick16--+--------------+            |
+             |   (DIV clocks/tick)  |              |            |
+ parity_en --+----------------------+--------------+            |
+ parity_odd -+----------------------+--------------+            |
+ tx_valid  --+--------------------> uart_tx ---------------------+--> tx_out
+ tx_data   --+--------------------> (16 ticks/bit) |            |
+ tx_ready  <-+--------------------- |              v            |
+             |                                  uart_rx <-------+--- rx_in
+ rx_data   <-+------------------------------- (2-FF sync,      |
+ rx_valid  <-+-------------------------------  mid-bit sample) |
+ frame_err <-+-------------------------------                   |
+ parity_err<-+-------------------------------                   |
+             +--------------------------------------------------+
 ```
+
+Frame: start, 8 data bits LSB first, parity bit (if `parity_en`), stop.
 
 | Module | What it does |
 |---|---|
 | `baud_gen` | Pulses `tick16` every `DIV` clocks (16 ticks per UART bit). |
-| `uart_tx` | Valid/ready handshake. Accepts a byte only on a tick so every bit is exactly 16 ticks. Sends start, 8 data bits LSB first, stop. |
-| `uart_rx` | 2-FF synchronizer. Rejects start-bit glitches. Samples mid-bit. Pulses `rx_valid` on a good stop bit, `frame_err` on a bad one, then waits for the line to go idle. |
+| `uart_tx` | Valid/ready handshake. Accepts a byte only on a tick so every bit is exactly 16 ticks. Computes the parity bit when the byte is accepted. |
+| `uart_rx` | 2-FF synchronizer. Rejects start-bit glitches. Samples mid-bit. At the stop bit it pulses `frame_err` (stop bit low) and/or `parity_err` (parity mismatch) independently; `rx_valid` only if neither. After a bad stop bit it waits for the line to go idle. |
 | `uart_top` | Wires the three together. `DIV` is a parameter (default 4). |
 
-With a 100 MHz clock and `DIV = 4`, one bit is 64 clocks (640 ns), about 1.56 Mbaud.
+Parity config (`parity_en`, `parity_odd`; even when `parity_odd = 0`) is latched at
+the start of each frame. With a 100 MHz clock and `DIV = 4`, one bit is 64 clocks
+(640 ns), about 1.56 Mbaud.
 
 ## Testbench
 
@@ -49,26 +56,34 @@ With a 100 MHz clock and `DIV = 4`, one bit is 64 clocks (640 ns), about 1.56 Mb
                  |
                  +--> scoreboard : accepted == wire (TX path)
                  |                 wire == receiver output (RX path)
-                 +--> coverage   : data class x gap, bit toggles, good/bad frames
+                 +--> coverage   : data class x gap, bit toggles, error kinds
 ```
 
+- **Parity mode per run.** The test reads `+PARITY=none|even|odd` (default even)
+  and sets it on the interface before reset is released. The driver, monitor and
+  scoreboard all follow it.
 - **Loopback by default.** The DUT's `tx_out` feeds its own `rx_in`, so one byte
   exercises both paths.
 - **Error injection.** For injected items the driver takes over the RX line and
-  drives the frame itself, optionally with a bad stop bit. The scoreboard then
-  expects `frame_err` instead of data.
+  drives the frame itself, optionally with a bad stop bit, a flipped parity bit,
+  or both. The scoreboard then expects no data and exactly the matching
+  `frame_err` / `parity_err` flags.
 - **Two independent checks.** The TX path is checked against the bytes the DUT
   accepted, and the RX path against what was actually on the wire. A failure
   points to the side that broke.
 - **End-of-test checks.** Leftover items in any queue (dropped or spurious
   frames) are errors.
 - **Interface assertions.** `tx_valid` held until `tx_ready`, `tx_data` stable
-  while waiting, `rx_valid` and `frame_err` never together, and no X on outputs.
-  Failures are counted and reported by the scoreboard.
+  while waiting, `rx_valid` never together with an error flag, no `parity_err`
+  with parity off, parity config stable, and no X on outputs. Failures are
+  counted and reported by the scoreboard.
 - **Coverage.** 6 data classes (0x00, 0xFF, 0x55, 0xAA, low, high) x 3 gap kinds
-  (back-to-back, short, long), plus 0 and 1 on each of the 8 data bits: 34 bins.
-  The bins are hand-rolled rather than covergroups, so the report is the same in
-  any simulator.
+  (back-to-back, short, long), 0 and 1 on each of the 8 data bits, and the error
+  kind of each wire frame (good, bad stop, plus bad parity and both when parity
+  is on): 38 bins with parity, 36 without. The bins are hand-rolled rather than
+  covergroups, so the report is the same in any simulator.
+- **Checked against a planted bug.** With the receiver's odd-parity handling
+  broken on purpose, `all_test +PARITY=odd` fails with `RX_MISMATCH` errors.
 
 ### Tests
 
@@ -78,7 +93,8 @@ With a 100 MHz clock and `DIV = 4`, one bit is 64 clocks (640 ns), about 1.56 Mb
 | `b2b_test` | 32 random bytes back to back |
 | `random_test` | 60 random bytes with random gaps |
 | `frame_err_test` | 40 frames injected on the RX line, about 30% with a bad stop bit |
-| `all_test` | All of the above in one run (default) |
+| `parity_err_test` | 40 injected frames, about 50% with a flipped parity bit (needs parity on) |
+| `all_test` | Directed, back-to-back, random, then 30 injected frames with bad stop and/or parity (default) |
 
 ## Running
 
@@ -107,17 +123,18 @@ or in the Tcl console:
 launch_simulation
 ```
 
-**3. Pick a test.** `tb_top` runs `all_test` by default. To run another one,
-pass `+UVM_TESTNAME`:
+**3. Pick a test and parity mode.** `tb_top` runs `all_test` with even parity by
+default. Pass `+UVM_TESTNAME` and/or `+PARITY` to change that:
 
 ```
-set_property -name xsim.simulate.xsim.more_options -value {-testplusarg UVM_TESTNAME=frame_err_test} -objects [get_filesets sim_1]
+set_property -name xsim.simulate.xsim.more_options -value {-testplusarg UVM_TESTNAME=parity_err_test -testplusarg PARITY=odd} -objects [get_filesets sim_1]
 ```
 
 At the end of the log, look for:
 
 ```
-[SB] TX path: 58 pass, 0 fail | RX path: 78 pass, 0 fail | other: 0
+[CFG] frame format: 8 data bits, parity=even, 1 stop bit
+[SB] TX path: 58 pass, 0 fail | RX path: 88 pass, 0 fail | other: 0
 [SB] *** TEST PASSED ***
 ```
 
@@ -137,7 +154,7 @@ create_project.tcl # rebuilds the Vivado project
 
 ## Roadmap
 
-- [ ] Parity (none / even / odd) with `parity_err` and bad-parity injection
+- [x] Parity (none / even / odd) with `parity_err` and bad-parity injection
 - [ ] Configurable data bits (5-8)
 - [ ] 1 or 2 stop bits
 - [ ] Break detection, RX FIFO with overrun

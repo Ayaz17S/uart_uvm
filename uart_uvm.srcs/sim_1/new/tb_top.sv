@@ -33,10 +33,12 @@ module tb_top;
 
   uart_top #(.DIV(DIV)) dut (
     .clk(clk), .rst_n(vif.rst_n),
+    .parity_en(vif.parity_en), .parity_odd(vif.parity_odd),
     .tx_valid(vif.tx_valid), .tx_data(vif.tx_data),
     .tx_ready(vif.tx_ready), .tx_out(vif.tx_out),
     .rx_in(vif.rx_in), .rx_data(vif.rx_data),
-    .rx_valid(vif.rx_valid), .frame_err(vif.frame_err));
+    .rx_valid(vif.rx_valid), .frame_err(vif.frame_err),
+    .parity_err(vif.parity_err));
 
   initial begin
     vif.rst_n = 0;

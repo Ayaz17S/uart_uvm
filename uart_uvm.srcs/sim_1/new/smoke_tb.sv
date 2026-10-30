@@ -22,12 +22,13 @@
 
 module smoke_tb;
   logic clk = 0, rst_n = 0;
-  logic tx_valid = 0, tx_ready, tx_out, rx_valid, frame_err;
+  logic tx_valid = 0, tx_ready, tx_out, rx_valid, frame_err, parity_err;
   logic [7:0] tx_data, rx_data;
   always #5 clk = ~clk;
 
-  uart_top #(.DIV(4)) dut (.clk, .rst_n, .tx_valid, .tx_data, .tx_ready,
-                           .tx_out, .rx_in(tx_out), .rx_data, .rx_valid, .frame_err);
+  uart_top #(.DIV(4)) dut (.clk, .rst_n, .parity_en(1'b1), .parity_odd(1'b0),
+                           .tx_valid, .tx_data, .tx_ready, .tx_out, .rx_in(tx_out),
+                           .rx_data, .rx_valid, .frame_err, .parity_err);
 
    task automatic send(input logic [7:0] b);
     tx_data  <= b;
@@ -47,5 +48,6 @@ module smoke_tb;
   always @(posedge clk) begin
     if (rx_valid)  $display("%0t RX got %02h", $time, rx_data);
     if (frame_err) $display("%0t FRAME ERROR", $time);
+    if (parity_err) $display("%0t PARITY ERROR", $time);
   end
 endmodule
