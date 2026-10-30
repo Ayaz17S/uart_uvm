@@ -1,0 +1,16 @@
+module uart_top #(parameter int DIV = 4) (
+  input  logic       clk, rst_n,
+  input  logic       tx_valid,
+  input  logic [7:0] tx_data,
+  output logic       tx_ready,
+  output logic       tx_out,
+  input  logic       rx_in,
+  output logic [7:0] rx_data,
+  output logic       rx_valid,
+  output logic       frame_err
+);
+  logic tick16;
+  baud_gen #(.DIV(DIV)) u_baud (.clk, .rst_n, .tick16);
+  uart_tx u_tx (.clk, .rst_n, .tick16, .tx_valid, .tx_data, .tx_ready, .tx_out);
+  uart_rx u_rx (.clk, .rst_n, .tick16, .rx_in, .rx_data, .rx_valid, .frame_err);
+endmodule
