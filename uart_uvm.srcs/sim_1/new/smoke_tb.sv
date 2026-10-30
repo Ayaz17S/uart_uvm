@@ -26,7 +26,7 @@ module smoke_tb;
   logic [7:0] tx_data, rx_data;
   always #5 clk = ~clk;
 
-  uart_top #(.DIV(4)) dut (.clk, .rst_n, .parity_en(1'b1), .parity_odd(1'b0), .data_bits(2'd3),
+  uart_top #(.DIV(4)) dut (.clk, .rst_n, .parity_en(1'b1), .parity_odd(1'b0), .data_bits(2'd3), .stop2(1'b0),
                            .tx_valid, .tx_data, .tx_ready, .tx_out, .rx_in(tx_out),
                            .rx_data, .rx_valid, .frame_err, .parity_err);
 

@@ -5,6 +5,7 @@ interface uart_if (input logic clk);
   logic       parity_en  = 0;
   logic       parity_odd = 0;
   logic [1:0] data_bits  = 2'd3;   // 0..3 = 5..8 data bits
+  logic       stop2      = 0;      // 0: 1 stop bit, 1: 2 stop bits (TX)
   // TX side
   logic       tx_valid = 0;
   logic [7:0] tx_data  = '0;
@@ -60,7 +61,7 @@ interface uart_if (input logic clk);
 
   // frame config must not change while out of reset
   a_cfg_stable: assert property (@(posedge clk) disable iff (!rst_n)
-                  $stable({parity_en, parity_odd, data_bits}))
+                  $stable({parity_en, parity_odd, data_bits, stop2}))
     else begin assert_errors++; $error("frame config changed during operation"); end
 
   // received data is right-aligned: bits above the configured width are 0

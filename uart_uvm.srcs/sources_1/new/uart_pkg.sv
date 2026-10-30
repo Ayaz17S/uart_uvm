@@ -50,6 +50,7 @@ package uart_pkg;
     bit inject;                  // 0: send via TX path, 1: drive the RX line directly
     bit bad_stop;                // inject only: stop bit forced to 0 (framing error)
     bit bad_parity;              // inject only: parity bit flipped (ignored if parity is off)
+    bit short_stop;              // inject only: one stop bit even when configured for two
 
     constraint c_gap_kind { gap_kind inside {[0:2]}; }
     constraint c_gap {
@@ -65,8 +66,9 @@ package uart_pkg;
     endfunction
 
     virtual function string convert2string();
-      return $sformatf("%s data=0x%02h gap=%0d%s%s", inject ? "INJECT" : "TX",
-                       data, gap, bad_stop ? " BAD_STOP" : "", bad_parity ? " BAD_PARITY" : "");
+      return $sformatf("%s data=0x%02h gap=%0d%s%s%s", inject ? "INJECT" : "TX",
+                       data, gap, bad_stop ? " BAD_STOP" : "", bad_parity ? " BAD_PARITY" : "",
+                       short_stop ? " SHORT_STOP" : "");
     endfunction
   endclass
 
@@ -144,18 +146,31 @@ package uart_pkg;
     int unsigned count        = 20;
     int unsigned bad_stop_pct = 30;
     int unsigned bad_par_pct  = 30;
+    int unsigned short_stop_pct = 30;
+    bit          corners = 1;   // start with one frame of each enabled error kind, then go random
     function new(string name = "uart_inject_seq");
       super.new(name);
     endfunction
     virtual task body();
-      repeat (count) begin
+      bit [1:0] kinds[$];       // {bad_parity, bad_stop}
+      if (corners)
+        for (int k = 0; k < 4; k++)
+          if ((!k[0] || bad_stop_pct > 0) && (!k[1] || bad_par_pct > 0)) kinds.push_back(k);
+      for (int i = 0; i < count; i++) begin
         req = uart_item::type_id::create("req");
         start_item(req);
         if (!req.randomize())
           `uvm_fatal("RAND", "randomize failed")
-        req.inject     = 1'b1;
-        req.bad_stop   = ($urandom_range(99) < bad_stop_pct);
-        req.bad_parity = ($urandom_range(99) < bad_par_pct);
+        req.inject = 1'b1;
+        if (i < kinds.size()) begin
+          req.bad_stop   = kinds[i][0];
+          req.bad_parity = kinds[i][1];
+          req.short_stop = (kinds[i] == 0);   // the clean corner also ends after one stop bit
+        end else begin
+          req.bad_stop   = ($urandom_range(99) < bad_stop_pct);
+          req.bad_parity = ($urandom_range(99) < bad_par_pct);
+          req.short_stop = ($urandom_range(99) < short_stop_pct);
+        end
         finish_item(req);
       end
     endtask
@@ -170,6 +185,7 @@ package uart_pkg;
     obs_kind_e kind;
     bit [7:0]  data;
     bit        stop_ok;     // OBS_FRAME: stop bit was high
+    bit        stop2_ok;    // OBS_FRAME: second stop bit high (TX frames with 2 stop bits; else 1)
     bit        parity_ok;   // OBS_FRAME: parity bit matched (always 1 with parity off)
     bit        has_parity;  // OBS_FRAME: frame carried a parity bit
     bit        via_loop;    // OBS_FRAME: frame came from the DUT's own TX
@@ -182,8 +198,8 @@ package uart_pkg;
     endfunction
     virtual function string convert2string();
       if (kind == OBS_FRAME)
-        return $sformatf("%s data=0x%02h stop_ok=%0b parity_ok=%0b @%0t",
-                         kind.name(), data, stop_ok, parity_ok, t);
+        return $sformatf("%s data=0x%02h stop_ok=%0b stop2_ok=%0b parity_ok=%0b @%0t",
+                         kind.name(), data, stop_ok, stop2_ok, parity_ok, t);
       return $sformatf("%s data=0x%02h frame_err=%0b parity_err=%0b @%0t",
                        kind.name(), data, frame_err, parity_err, t);
     endfunction
@@ -249,7 +265,7 @@ package uart_pkg;
       int unsigned n = nbits(vif);
       `uvm_info("DRV", $sformatf("send %s", it.convert2string()), UVM_MEDIUM)
       if (last_was_tx)   // let any in-flight TX frame finish before leaving loopback
-        repeat (12 * BIT_CLKS) @(vif.drv_cb);
+        repeat (13 * BIT_CLKS) @(vif.drv_cb);
       last_was_tx = 1'b0;
       vif.drv_cb.loopback_en <= 1'b0;
       repeat (it.gap + 1) @(vif.drv_cb);
@@ -263,10 +279,14 @@ package uart_pkg;
         vif.drv_cb.rx_drv <= (^(it.data & dmask(n))) ^ vif.parity_odd ^ it.bad_parity;
         repeat (BIT_CLKS) @(vif.drv_cb);
       end
-      vif.drv_cb.rx_drv <= it.bad_stop ? 1'b0 : 1'b1; // stop
+      vif.drv_cb.rx_drv <= it.bad_stop ? 1'b0 : 1'b1; // first stop bit (the only one the receiver checks)
       repeat (BIT_CLKS) @(vif.drv_cb);
-      vif.drv_cb.rx_drv <= 1'b1;                      // idle
-      repeat (2 * BIT_CLKS) @(vif.drv_cb);
+      vif.drv_cb.rx_drv <= 1'b1;
+      if (it.bad_stop)                                // idle line so the receiver can resync
+        repeat (2 * BIT_CLKS) @(vif.drv_cb);
+      else if (vif.stop2 && !it.short_stop)           // second stop bit, unless left out on purpose
+        repeat (BIT_CLKS) @(vif.drv_cb);
+      // otherwise the next frame may start right away (gap + 1 clocks)
     endtask
   endclass
 
@@ -348,6 +368,11 @@ package uart_pkg;
           end
           repeat (BIT_CLKS) @(vif.mon_cb);
           ok = vif.mon_cb.rx_in;
+          o.stop2_ok = 1'b1;
+          if (ok && o.via_loop && vif.stop2) begin   // our TX must hold a second stop bit
+            repeat (BIT_CLKS) @(vif.mon_cb);
+            o.stop2_ok = vif.mon_cb.rx_in;
+          end
           o.kind    = OBS_FRAME;
           o.data    = d;
           o.stop_ok = ok;
@@ -427,10 +452,10 @@ package uart_pkg;
       while (acc_q.size() > 0 && line_tx_q.size() > 0) begin
         a = acc_q.pop_front();
         l = line_tx_q.pop_front();
-        if (a.data !== l.data || !l.stop_ok || !l.parity_ok) begin
+        if (a.data !== l.data || !l.stop_ok || !l.stop2_ok || !l.parity_ok) begin
           tx_fail++;
-          `uvm_error("TX_MISMATCH", $sformatf("accepted 0x%02h but wire shows 0x%02h (stop_ok=%0b parity_ok=%0b)",
-                                              a.data, l.data, l.stop_ok, l.parity_ok))
+          `uvm_error("TX_MISMATCH", $sformatf("accepted 0x%02h but wire shows 0x%02h (stop_ok=%0b stop2_ok=%0b parity_ok=%0b)",
+                                              a.data, l.data, l.stop_ok, l.stop2_ok, l.parity_ok))
         end else tx_pass++;
       end
     endfunction
@@ -502,6 +527,7 @@ package uart_pkg;
     bit seen0[8], seen1[8];
     int unsigned err_hits[string];   // wire frames by error kind
     bit          saw_parity;         // any frame carried a parity bit
+    int unsigned short_stop_hits;    // 1-stop frames sent to a receiver set for 2
     virtual uart_if vif;
     string data_bins[$] = '{"zero", "ones", "a55", "aAA", "low", "high"};
     string gap_bins[$]  = '{"b2b", "short", "long"};
@@ -542,7 +568,10 @@ package uart_pkg;
     function void write(uart_item t);
       string key;
       int unsigned n = nbits(vif);
-      if (t.inject) return;
+      if (t.inject) begin
+        if (vif.stop2 && t.short_stop && !t.bad_stop) short_stop_hits++;
+        return;
+      end
       key = {data_bin(t.data, n), ":", gap_bin(t.gap_kind)};
       if (!hits.exists(key)) hits[key] = 0;
       hits[key]++;
@@ -608,6 +637,12 @@ package uart_pkg;
           if (n > 0) covered++;
         end
         s = {s, "\n"};
+      end
+      // With 2 stop bits, the receiver must also take frames that end after one
+      if (vif.stop2) begin
+        s = {s, $sformatf("  1-stop frames into 2-stop receiver: %0d\n", short_stop_hits)};
+        total++;
+        if (short_stop_hits > 0) covered++;
       end
       pct = (total == 0) ? 0.0 : (100.0 * covered / total);
       s = {s, $sformatf("  functional coverage: %0d/%0d bins = %0.1f%%", covered, total, pct)};
@@ -690,15 +725,20 @@ package uart_pkg;
       env = uart_env::type_id::create("env", this);
     endfunction
 
-    // Frame format from +DATA_BITS=5..8 (default 8) and +PARITY=none|even|odd
-    // (default even). Applied before reset is released and held for the whole run.
+    // Frame format from +DATA_BITS=5..8 (default 8), +PARITY=none|even|odd
+    // (default even) and +STOP_BITS=1|2 (default 1). Applied before reset is
+    // released and held for the whole run.
     function void set_frame_config();
       string mode;
-      int    n;
+      int    n, sb;
       if (!$value$plusargs("DATA_BITS=%d", n)) n = 8;
       if (n < 5 || n > 8)
         `uvm_fatal("CFG", $sformatf("bad +DATA_BITS=%0d (use 5 to 8)", n))
       vif.data_bits = n - 5;
+      if (!$value$plusargs("STOP_BITS=%d", sb)) sb = 1;
+      if (sb != 1 && sb != 2)
+        `uvm_fatal("CFG", $sformatf("bad +STOP_BITS=%0d (use 1 or 2)", sb))
+      vif.stop2 = (sb == 2);
       if (!$value$plusargs("PARITY=%s", mode)) mode = "even";
       case (mode)
         "none":  begin vif.parity_en = 1'b0; vif.parity_odd = 1'b0; end
@@ -706,7 +746,7 @@ package uart_pkg;
         "odd":   begin vif.parity_en = 1'b1; vif.parity_odd = 1'b1; end
         default: `uvm_fatal("CFG", $sformatf("bad +PARITY=%s (use none, even or odd)", mode))
       endcase
-      `uvm_info("CFG", $sformatf("frame format: %0d data bits, parity=%s, 1 stop bit", n, mode), UVM_NONE)
+      `uvm_info("CFG", $sformatf("frame format: %0d data bits, parity=%s, %0d stop bit(s)", n, mode, sb), UVM_NONE)
     endfunction
 
     // Run a sequence, then wait until the DUT has produced one output per frame

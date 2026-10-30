@@ -34,6 +34,7 @@ module tb_top;
   uart_top #(.DIV(DIV)) dut (
     .clk(clk), .rst_n(vif.rst_n),
     .parity_en(vif.parity_en), .parity_odd(vif.parity_odd), .data_bits(vif.data_bits),
+    .stop2(vif.stop2),
     .tx_valid(vif.tx_valid), .tx_data(vif.tx_data),
     .tx_ready(vif.tx_ready), .tx_out(vif.tx_out),
     .rx_in(vif.rx_in), .rx_data(vif.rx_data),
