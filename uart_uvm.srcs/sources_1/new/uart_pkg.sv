@@ -27,6 +27,14 @@ package uart_pkg;
   parameter int DIV      = 4;          // clocks per tick16 (also used by tb_top)
   parameter int BIT_CLKS = DIV * 16;   // clocks per UART bit
 
+  // Configured data width (5..8) and the mask of the bits that are sent
+  function automatic int unsigned nbits(virtual uart_if vif);
+    return vif.data_bits + 5;
+  endfunction
+  function automatic bit [7:0] dmask(int unsigned n);
+    return 8'hFF >> (8 - n);
+  endfunction
+
   `uvm_analysis_imp_decl(_acc)
   `uvm_analysis_imp_decl(_line)
   `uvm_analysis_imp_decl(_out)
@@ -238,6 +246,7 @@ package uart_pkg;
 
     // Error path: drive a frame on the RX line ourselves
     task drive_inject(uart_item it);
+      int unsigned n = nbits(vif);
       `uvm_info("DRV", $sformatf("send %s", it.convert2string()), UVM_MEDIUM)
       if (last_was_tx)   // let any in-flight TX frame finish before leaving loopback
         repeat (12 * BIT_CLKS) @(vif.drv_cb);
@@ -246,12 +255,12 @@ package uart_pkg;
       repeat (it.gap + 1) @(vif.drv_cb);
       vif.drv_cb.rx_drv <= 1'b0;                      // start
       repeat (BIT_CLKS) @(vif.drv_cb);
-      for (int i = 0; i < 8; i++) begin               // data, LSB first
+      for (int i = 0; i < n; i++) begin               // data, LSB first
         vif.drv_cb.rx_drv <= it.data[i];
         repeat (BIT_CLKS) @(vif.drv_cb);
       end
       if (vif.parity_en) begin                        // parity, optionally flipped
-        vif.drv_cb.rx_drv <= (^it.data) ^ vif.parity_odd ^ it.bad_parity;
+        vif.drv_cb.rx_drv <= (^(it.data & dmask(n))) ^ vif.parity_odd ^ it.bad_parity;
         repeat (BIT_CLKS) @(vif.drv_cb);
       end
       vif.drv_cb.rx_drv <= it.bad_stop ? 1'b0 : 1'b1; // stop
@@ -300,7 +309,7 @@ package uart_pkg;
         if (vif.mon_cb.tx_valid && vif.mon_cb.tx_ready) begin
           uart_obs o = uart_obs::type_id::create("acc");
           o.kind = OBS_ACCEPT;
-          o.data = vif.mon_cb.tx_data;
+          o.data = vif.mon_cb.tx_data & dmask(nbits(vif));   // only the configured width is sent
           o.t    = $time;
           acc_ap.write(o);
         end
@@ -312,18 +321,21 @@ package uart_pkg;
       bit       prev = 1'b1;
       bit [7:0] d;
       bit       ok, p;
+      int unsigned n;
       uart_obs  o;
       forever begin
         @(vif.mon_cb);
         if (prev && !vif.mon_cb.rx_in) begin
           o = uart_obs::type_id::create("frame");
+          n = nbits(vif);
+          d = '0;
           o.via_loop = vif.loopback_en;
           repeat (BIT_CLKS / 2) @(vif.mon_cb);
           if (vif.mon_cb.rx_in) begin     // glitch, not a real start bit
             prev = 1'b1;
             continue;
           end
-          for (int i = 0; i < 8; i++) begin
+          for (int i = 0; i < n; i++) begin
             repeat (BIT_CLKS) @(vif.mon_cb);
             d[i] = vif.mon_cb.rx_in;
           end
@@ -490,6 +502,7 @@ package uart_pkg;
     bit seen0[8], seen1[8];
     int unsigned err_hits[string];   // wire frames by error kind
     bit          saw_parity;         // any frame carried a parity bit
+    virtual uart_if vif;
     string data_bins[$] = '{"zero", "ones", "a55", "aAA", "low", "high"};
     string gap_bins[$]  = '{"b2b", "short", "long"};
 
@@ -499,13 +512,23 @@ package uart_pkg;
       line_imp = new("line_imp", this);
     endfunction
 
-    function string data_bin(bit [7:0] d);
-      if      (d == 8'h00) return "zero";
-      else if (d == 8'hFF) return "ones";
-      else if (d == 8'h55) return "a55";
-      else if (d == 8'hAA) return "aAA";
-      else if (d < 8'h80)  return "low";
-      else                 return "high";
+    function void build_phase(uvm_phase phase);
+      super.build_phase(phase);
+      if (!uvm_config_db#(virtual uart_if)::get(this, "", "vif", vif))
+        `uvm_fatal("NOVIF", "virtual interface not set for coverage")
+    endfunction
+
+    // Classes are relative to the configured width: "ones" is all n bits set,
+    // a55/aAA are the alternating patterns cut to n bits, low/high split at the MSB
+    function string data_bin(bit [7:0] d, int unsigned n);
+      bit [7:0] m = dmask(n);
+      d &= m;
+      if      (d == 8'h00)      return "zero";
+      else if (d == m)          return "ones";
+      else if (d == (8'h55 & m)) return "a55";
+      else if (d == (8'hAA & m)) return "aAA";
+      else if (!d[n-1])         return "low";
+      else                      return "high";
     endfunction
 
     function string gap_bin(bit [1:0] g);
@@ -518,11 +541,12 @@ package uart_pkg;
 
     function void write(uart_item t);
       string key;
+      int unsigned n = nbits(vif);
       if (t.inject) return;
-      key = {data_bin(t.data), ":", gap_bin(t.gap_kind)};
+      key = {data_bin(t.data, n), ":", gap_bin(t.gap_kind)};
       if (!hits.exists(key)) hits[key] = 0;
       hits[key]++;
-      for (int i = 0; i < 8; i++) begin
+      for (int i = 0; i < n; i++) begin
         if (t.data[i]) seen1[i] = 1'b1;
         else           seen0[i] = 1'b1;
       end
@@ -558,18 +582,16 @@ package uart_pkg;
         end
         s = {s, "\n"};
       end
-      for (int i = 0; i < 8; i++) begin
-        total += 2;
-        if (seen0[i]) covered++;
-        if (seen1[i]) covered++;
-      end
       begin
+        int unsigned n = nbits(vif);
         int tog = 0;
-        for (int i = 0; i < 8; i++) begin
+        for (int i = 0; i < n; i++) begin
+          total += 2;
           if (seen0[i]) tog++;
           if (seen1[i]) tog++;
         end
-        s = {s, $sformatf("  bit toggles (0 and 1 on each of 8 bits): %0d/16 bins\n", tog)};
+        covered += tog;
+        s = {s, $sformatf("  bit toggles (0 and 1 on each of %0d bits): %0d/%0d bins\n", n, tog, 2 * n)};
       end
       // Error kinds on the wire; parity-error bins only count when parity is on
       begin
@@ -668,10 +690,15 @@ package uart_pkg;
       env = uart_env::type_id::create("env", this);
     endfunction
 
-    // Parity mode from +PARITY=none|even|odd (default even). Applied before
-    // reset is released and held for the whole run.
+    // Frame format from +DATA_BITS=5..8 (default 8) and +PARITY=none|even|odd
+    // (default even). Applied before reset is released and held for the whole run.
     function void set_frame_config();
       string mode;
+      int    n;
+      if (!$value$plusargs("DATA_BITS=%d", n)) n = 8;
+      if (n < 5 || n > 8)
+        `uvm_fatal("CFG", $sformatf("bad +DATA_BITS=%0d (use 5 to 8)", n))
+      vif.data_bits = n - 5;
       if (!$value$plusargs("PARITY=%s", mode)) mode = "even";
       case (mode)
         "none":  begin vif.parity_en = 1'b0; vif.parity_odd = 1'b0; end
@@ -679,7 +706,7 @@ package uart_pkg;
         "odd":   begin vif.parity_en = 1'b1; vif.parity_odd = 1'b1; end
         default: `uvm_fatal("CFG", $sformatf("bad +PARITY=%s (use none, even or odd)", mode))
       endcase
-      `uvm_info("CFG", $sformatf("frame format: 8 data bits, parity=%s, 1 stop bit", mode), UVM_NONE)
+      `uvm_info("CFG", $sformatf("frame format: %0d data bits, parity=%s, 1 stop bit", n, mode), UVM_NONE)
     endfunction
 
     // Run a sequence, then wait until the DUT has produced one output per frame

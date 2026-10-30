@@ -3,6 +3,7 @@ module uart_top #(parameter int DIV = 4) (
   input  logic       clk, rst_n,
   input  logic       parity_en,     // 1: frames carry a parity bit
   input  logic       parity_odd,    // 0: even parity, 1: odd parity
+  input  logic [1:0] data_bits,     // 0..3 = 5..8 data bits
   input  logic       tx_valid,
   input  logic [7:0] tx_data,
   output logic       tx_ready,
@@ -15,8 +16,8 @@ module uart_top #(parameter int DIV = 4) (
 );
   logic tick16;
   baud_gen #(.DIV(DIV)) u_baud (.clk, .rst_n, .tick16);
-  uart_tx u_tx (.clk, .rst_n, .tick16, .parity_en, .parity_odd,
+  uart_tx u_tx (.clk, .rst_n, .tick16, .parity_en, .parity_odd, .data_bits,
                 .tx_valid, .tx_data, .tx_ready, .tx_out);
-  uart_rx u_rx (.clk, .rst_n, .tick16, .parity_en, .parity_odd,
+  uart_rx u_rx (.clk, .rst_n, .tick16, .parity_en, .parity_odd, .data_bits,
                 .rx_in, .rx_data, .rx_valid, .frame_err, .parity_err);
 endmodule

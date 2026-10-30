@@ -4,6 +4,7 @@ interface uart_if (input logic clk);
   // Frame config: set by the test before reset is released, then held
   logic       parity_en  = 0;
   logic       parity_odd = 0;
+  logic [1:0] data_bits  = 2'd3;   // 0..3 = 5..8 data bits
   // TX side
   logic       tx_valid = 0;
   logic [7:0] tx_data  = '0;
@@ -59,8 +60,13 @@ interface uart_if (input logic clk);
 
   // frame config must not change while out of reset
   a_cfg_stable: assert property (@(posedge clk) disable iff (!rst_n)
-                  $stable({parity_en, parity_odd}))
-    else begin assert_errors++; $error("parity config changed during operation"); end
+                  $stable({parity_en, parity_odd, data_bits}))
+    else begin assert_errors++; $error("frame config changed during operation"); end
+
+  // received data is right-aligned: bits above the configured width are 0
+  a_rx_aligned: assert property (@(posedge clk) disable iff (!rst_n)
+                  rx_valid |-> (rx_data >> (data_bits + 5)) == 0)
+    else begin assert_errors++; $error("rx_data has bits set above the data width"); end
 
   // no X on outputs after reset
   a_no_x: assert property (@(posedge clk) disable iff (!rst_n)
