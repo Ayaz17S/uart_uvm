@@ -184,3 +184,24 @@ create_project.tcl # rebuilds the Vivado project
 - [x] Configurable data bits (5-8)
 - [x] 1 or 2 stop bits
 - [ ] Break detection, RX FIFO with overrun
+
+## Future work
+
+Ideas for extending the design and the testbench:
+
+- **Break detection.** Recognise the line held low for a whole frame or longer
+  and report a break instead of a framing error. Test it by injecting long low
+  periods of different lengths.
+- **RX FIFO with overrun.** Buffer received bytes behind a read interface and
+  flag bytes dropped when the FIFO is full. The scoreboard would then need to
+  model the FIFO and predict exactly which bytes are lost.
+- **Runtime baud rate and clock mismatch.** Replace the `DIV` parameter with a
+  divisor input so tests can change the rate, and check that the receiver still
+  works when the sender's clock is a few percent off.
+- **Covergroups.** Move the hand-rolled coverage bins to SystemVerilog
+  covergroups, with a cross of data width, parity and stop bits, for simulators
+  with full coverage support.
+- **Regression script.** Run every frame format over several random seeds with
+  one command and print a pass/fail summary.
+- **Synthesis results.** Synthesize `uart_top` for a target FPGA and report
+  resource use and maximum clock frequency.
